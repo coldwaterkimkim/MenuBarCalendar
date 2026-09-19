@@ -11,7 +11,6 @@
 		002 /* CalendarEvent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 102 /* CalendarEvent.swift */; };
 		003 /* Settings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 103 /* Settings.swift */; };
 		004 /* CalendarService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 104 /* CalendarService.swift */; };
-		005 /* MenuContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 105 /* MenuContent.swift */; };
 		006 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 106 /* SettingsView.swift */; };
 		007 /* RelativeTimeFormatter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 107 /* RelativeTimeFormatter.swift */; };
 		008 /* EventKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 201 /* EventKit.framework */; };
@@ -24,7 +23,6 @@
 		102 /* CalendarEvent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CalendarEvent.swift; sourceTree = "<group>"; };
 		103 /* Settings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Settings.swift; sourceTree = "<group>"; };
 		104 /* CalendarService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CalendarService.swift; sourceTree = "<group>"; };
-		105 /* MenuContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuContent.swift; sourceTree = "<group>"; };
 		106 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		107 /* RelativeTimeFormatter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelativeTimeFormatter.swift; sourceTree = "<group>"; };
 		108 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -105,7 +103,6 @@
 		406 /* Views */ = {
 			isa = PBXGroup;
 			children = (
-				105 /* MenuContent.swift */,
 				106 /* SettingsView.swift */,
 			);
 			path = Views;
@@ -193,7 +190,6 @@
 				002 /* CalendarEvent.swift in Sources */,
 				003 /* Settings.swift in Sources */,
 				004 /* CalendarService.swift in Sources */,
-				005 /* MenuContent.swift in Sources */,
 				006 /* SettingsView.swift in Sources */,
 				007 /* RelativeTimeFormatter.swift in Sources */,
 			);

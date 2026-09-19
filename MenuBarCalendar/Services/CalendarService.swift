@@ -14,22 +14,27 @@ class CalendarService: ObservableObject {
     private let eventStore = EKEventStore()
     private var timer: Timer?
     private var cancellables = Set<AnyCancellable>()
-    
+    private var lastFetchDate: Date?
+    private var cachedLookaheadHours: Int?
+    private var cachedExcludedCalendarIDs: Set<String> = []
+    private var lastMenuBarTitle = ""
+    private let minimumFetchIntervalSeconds: TimeInterval = 300
+
     @Published var authorizationStatus: AuthorizationStatus = .notDetermined
-    @Published var events: [CalendarEvent] = []
     @Published var currentEvent: CalendarEvent?
     @Published var nextEvent: CalendarEvent?
     @Published var menuBarTitle: String = "다음 일정 없음"
     @Published var availableCalendars: [EKCalendar] = []
-    
+    private var events: [CalendarEvent] = []
+
     private let settings = SettingsManager.shared
-    
+
     init() {
         checkAuthorizationStatus()
         setupNotifications()
         setupSettingsObserver()
     }
-    
+
     private func setupNotifications() {
         NotificationCenter.default.addObserver(
             self,
@@ -38,29 +43,40 @@ class CalendarService: ObservableObject {
             object: eventStore
         )
     }
-    
+
     private func setupSettingsObserver() {
-        settings.objectWillChange.sink { [weak self] _ in
-            Task { @MainActor in
-                self?.refreshEvents()
+        settings.eventDisplayChanged
+            .debounce(for: .milliseconds(150), scheduler: RunLoop.main)
+            .sink { [weak self] _ in
+                Task { @MainActor in
+                    self?.refreshEvents(forceFetch: false, refreshSources: false)
+                }
             }
-        }.store(in: &cancellables)
+            .store(in: &cancellables)
     }
-    
+
     @objc private func calendarChanged() {
         Task { @MainActor in
-            refreshEvents()
+            loadCalendars()
+            refreshEvents(forceFetch: true, refreshSources: true)
         }
     }
-    
-    func checkAuthorizationStatus() {
+
+    func checkAuthorizationStatus(refreshIfAuthorized: Bool = true) {
         let status = EKEventStore.authorizationStatus(for: .event)
         switch status {
         case .authorized, .fullAccess:
+            let becameAuthorized = authorizationStatus != .authorized
             authorizationStatus = .authorized
-            loadCalendars()
-            refreshEvents()
-            startTimer()
+            if becameAuthorized || refreshIfAuthorized {
+                loadCalendars()
+            }
+            if refreshIfAuthorized {
+                refreshEvents(forceFetch: true, refreshSources: true)
+            }
+            if becameAuthorized {
+                startTimer()
+            }
         case .denied, .restricted:
             authorizationStatus = .denied
             menuBarTitle = "권한 필요"
@@ -70,7 +86,7 @@ class CalendarService: ObservableObject {
             authorizationStatus = .notDetermined
         }
     }
-    
+
     func requestAccess() async {
         do {
             let granted: Bool
@@ -79,11 +95,11 @@ class CalendarService: ObservableObject {
             } else {
                 granted = try await eventStore.requestAccess(to: .event)
             }
-            
+
             if granted {
                 authorizationStatus = .authorized
                 loadCalendars()
-                refreshEvents()
+                refreshEvents(forceFetch: true, refreshSources: true)
                 startTimer()
             } else {
                 authorizationStatus = .denied
@@ -94,21 +110,21 @@ class CalendarService: ObservableObject {
             menuBarTitle = "권한 필요"
         }
     }
-    
+
     private func loadCalendars() {
         availableCalendars = eventStore.calendars(for: .event)
     }
-    
+
     private func startTimer() {
         timer?.invalidate()
-        
+
         // Calculate time until next minute boundary
         let now = Date()
         let calendar = Calendar.current
         let seconds = calendar.component(.second, from: now)
         let nanoseconds = calendar.component(.nanosecond, from: now)
         let secondsUntilNextMinute = Double(60 - seconds) - Double(nanoseconds) / 1_000_000_000
-        
+
         // First, schedule a one-shot timer to sync with minute boundary
         timer = Timer.scheduledTimer(withTimeInterval: secondsUntilNextMinute, repeats: false) { [weak self] _ in
             Task { @MainActor in
@@ -117,8 +133,9 @@ class CalendarService: ObservableObject {
                 self?.startMinuteTimer()
             }
         }
+        timer?.tolerance = max(1, secondsUntilNextMinute * 0.1)
     }
-    
+
     private func startMinuteTimer() {
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
@@ -126,86 +143,137 @@ class CalendarService: ObservableObject {
                 self?.refreshEvents()
             }
         }
+        timer?.tolerance = 5
     }
-    
-    func refreshEvents() {
+
+    func refreshEvents(forceFetch: Bool = false, refreshSources: Bool = false) {
         guard authorizationStatus == .authorized else { return }
-        
-        // 외부 앱(Calendar.app)에서의 변경사항을 반영하기 위해 소스 갱신
-        eventStore.refreshSourcesIfNecessary()
-        
+
         let now = Date()
-        let endDate = Calendar.current.date(byAdding: .hour, value: settings.lookaheadHours, to: now)!
-        
+        let shouldFetch = forceFetch || shouldFetchEvents(now: now)
+
+        if shouldFetch {
+            if refreshSources {
+                eventStore.refreshSourcesIfNecessary()
+            }
+            fetchEvents(now: now)
+        }
+
+        updateCurrentAndNextEvent()
+        updateMenuBarTitleIfNeeded()
+    }
+
+    private func shouldFetchEvents(now: Date) -> Bool {
+        if lastFetchDate == nil {
+            return true
+        }
+
+        if cachedLookaheadHours != settings.lookaheadHours ||
+            cachedExcludedCalendarIDs != settings.excludedCalendarIDs {
+            return true
+        }
+
+        return now.timeIntervalSince(lastFetchDate ?? .distantPast) >= minimumFetchIntervalSeconds
+    }
+
+    private func fetchEvents(now: Date) {
+        let lookaheadHours = settings.lookaheadHours
+        let excludedCalendarIDs = settings.excludedCalendarIDs
+        let endDate = Calendar.current.date(byAdding: .hour, value: lookaheadHours, to: now)!
+
         let predicate = eventStore.predicateForEvents(withStart: now.addingTimeInterval(-3600), end: endDate, calendars: nil)
         let ekEvents = eventStore.events(matching: predicate)
-        
-        // Filter events
-        let filtered = ekEvents.filter { event in
-            // Exclude calendars
+
+        let fetchedEvents = ekEvents.lazy.filter { event in
             if let calendarID = event.calendar?.calendarIdentifier,
-               settings.excludedCalendarIDs.contains(calendarID) {
+               excludedCalendarIDs.contains(calendarID) {
                 return false
             }
-            
-            // Filter all-day events
-            if event.isAllDay && !settings.showAllDayEvents {
+
+            if event.isAllDay {
                 return false
             }
-            
-            // Exclude cancelled/declined
+
             if event.status == .canceled {
                 return false
             }
-            
+
             return true
-        }
-        
-        events = filtered.map { CalendarEvent(from: $0) }
+        }.map { CalendarEvent(from: $0) }
             .sorted { $0.startDate < $1.startDate }
-        
-        // Find current event
-        let ongoingEvents = events.filter { $0.isOngoing && !$0.isAllDay }
-        
-        if !ongoingEvents.isEmpty {
-            switch settings.overlapRule {
-            case .earliestEnd:
-                currentEvent = ongoingEvents.min { $0.endDate < $1.endDate }
-            case .earliestStart:
-                currentEvent = ongoingEvents.min { $0.startDate < $1.startDate }
-            }
-        } else {
-            currentEvent = nil
+
+        if !eventsHaveSameDisplayContent(events, fetchedEvents) {
+            events = fetchedEvents
         }
-        
-        // Find next event
-        let upcomingEvents = events.filter { $0.isUpcoming && !$0.isAllDay }
-        nextEvent = upcomingEvents.first
-        
+
+        lastFetchDate = now
+        cachedLookaheadHours = lookaheadHours
+        cachedExcludedCalendarIDs = excludedCalendarIDs
+    }
+
+    private func eventsHaveSameDisplayContent(_ lhs: [CalendarEvent], _ rhs: [CalendarEvent]) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+
+        return zip(lhs, rhs).allSatisfy { existingEvent, newEvent in
+            existingEvent.hasSameDisplayContent(as: newEvent)
+        }
+    }
+
+    private func updateCurrentAndNextEvent() {
+        let now = Date()
+        var selectedCurrentEvent: CalendarEvent?
+        var selectedNextEvent: CalendarEvent?
+
+        for event in events {
+            if event.startDate <= now && now < event.endDate {
+                switch settings.overlapRule {
+                case .earliestEnd:
+                    if selectedCurrentEvent == nil || event.endDate < selectedCurrentEvent!.endDate {
+                        selectedCurrentEvent = event
+                    }
+                case .earliestStart:
+                    if selectedCurrentEvent == nil {
+                        selectedCurrentEvent = event
+                    }
+                }
+            } else if selectedNextEvent == nil && event.startDate > now {
+                selectedNextEvent = event
+                break
+            }
+        }
+
+        setCurrentEvent(selectedCurrentEvent)
+        setNextEvent(selectedNextEvent)
+    }
+
+    private func setCurrentEvent(_ event: CalendarEvent?) {
+        if !(event?.hasSameDisplayContent(as: currentEvent) ?? (currentEvent == nil)) {
+            currentEvent = event
+        }
+    }
+
+    private func setNextEvent(_ event: CalendarEvent?) {
+        if !(event?.hasSameDisplayContent(as: nextEvent) ?? (nextEvent == nil)) {
+            nextEvent = event
+        }
+    }
+
+    private func updateMenuBarTitleIfNeeded() {
         // Update menu bar title
         let displayEvent = currentEvent ?? nextEvent
-        menuBarTitle = RelativeTimeFormatter.formatMenuBarTitle(for: displayEvent, maxLength: settings.titleMaxLength)
-    }
-    
-    func openInCalendar(event: CalendarEvent) {
-        // Use the ical:// URL scheme to open Calendar app
-        // Format: ical://ekevent/[event-identifier]?method=show
-        if let eventID = event.ekEvent.eventIdentifier,
-           let url = URL(string: "ical://ekevent/\(eventID)?method=show") {
-            NSWorkspace.shared.open(url)
-        } else {
-            // Fallback: just open Calendar app
-            NSWorkspace.shared.open(URL(string: "ical://")!)
+        let newTitle = RelativeTimeFormatter.formatMenuBarTitle(for: displayEvent, maxLength: settings.titleMaxLength)
+        if newTitle != lastMenuBarTitle {
+            menuBarTitle = newTitle
+            lastMenuBarTitle = newTitle
         }
     }
-    
-    func getUpcomingEvents(count: Int) -> [CalendarEvent] {
-        let upcoming = events.filter { $0.isUpcoming || $0.isOngoing }
-            .sorted { $0.startDate < $1.startDate }
-        return Array(upcoming.prefix(count))
+
+    func openCalendarApp() {
+        NSWorkspace.shared.open(URL(string: "ical://")!)
     }
-    
+
     deinit {
         timer?.invalidate()
+        NotificationCenter.default.removeObserver(self)
     }
 }
